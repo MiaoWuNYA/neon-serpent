@@ -65,6 +65,26 @@
     const canvas = document.getElementById("gl");
     CAPS();
 
+    const P = (p, t) => { try { if (global.__NEON_PROGRESS) global.__NEON_PROGRESS(p, t); } catch (e) {} };
+
+    // 能力预检：先于 three.js 建上下文，给出可读的失败原因
+    P(0.86, "正在检测图形能力…");
+    let probeGL = null;
+    try {
+      probeGL = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: true, stencil: false })
+             || canvas.getContext("webgl", { alpha: false, depth: true });
+    } catch (e) { probeGL = null; }
+    if (!probeGL) {
+      throw new Error("此设备/浏览器未启用 WebGL，请更换浏览器或关闭省电模式");
+    }
+    const isGL2 = typeof WebGL2RenderingContext !== "undefined" && probeGL instanceof WebGL2RenderingContext;
+    caps.webgl2 = isGL2;
+    if (!isGL2 && !probeGL.getExtension("OES_texture_half_float")) {
+      throw new Error("显卡不支持半浮点贴图，无法运行 HDR 渲染");
+    }
+
+    P(0.87, "正在创建渲染上下文…");
+
     const q = N.QUALITY[qualityIdx];
     const dpr = Math.min(window.devicePixelRatio || 1, q.dpr);
 
@@ -73,6 +93,7 @@
       powerPreference: "high-performance",
       stencil: false, depth: true,
       preserveDrawingBuffer: false,
+      context: probeGL,          // 复用已通过预检的上下文，避免重复创建
     });
     renderer.setPixelRatio(dpr);
     renderer.setSize(window.innerWidth, window.innerHeight, false);
@@ -82,18 +103,24 @@
     renderer.shadowMap.enabled = false;
     renderer.info.autoReset = true;
 
-    if (!renderer.capabilities.isWebGL2) caps.webgl2 = false;
     caps.maxTexture = renderer.capabilities.maxTextureSize;
     caps.floatLinear = !!(
       renderer.extensions.get("OES_texture_half_float_linear") ||
-      (renderer.capabilities.isWebGL2)
+      renderer.capabilities.isWebGL2
     );
+
+    // 监听上下文丢失（移动端切后台/显存压力很常见），给出可恢复提示
+    canvas.addEventListener("webglcontextlost", (e) => {
+      e.preventDefault();
+      if (global.__NEON_FATAL) global.__NEON_FATAL("显卡上下文丢失，请刷新页面");
+    }, false);
 
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.5, 6000);
     camera.position.copy(state.camPos);
 
     // ---- 环境贴图（PBR 反射）----
+    P(0.88, "正在卷积环境光照…");
     env = SC.buildEnvironment(renderer);
     scene.environment = env;
 
@@ -106,6 +133,7 @@
     scene.add(grid);
 
     // ---- 蛇 ----
+    P(0.91, "正在构建蛇体网格…");
     serpent = new Serpent({
       tubeSegments: q.id === 0 ? 300 : q.id === 1 ? 240 : q.id === 2 ? 180 : 130,
       radialSegments: q.id <= 1 ? 14 : 10,
@@ -142,11 +170,13 @@
     game = new Game({ grid: GRID, cell: CELL, baseStep: 0.150 });
 
     // ---- 后处理 ----
+    P(0.93, "正在装配后处理管线…");
     postfx = new SC.PostFX(renderer, caps);
     postfx.setSize(bufW(), bufH());
     applyQuality(qualityIdx, true);
 
     // ---- UI ----
+    P(0.95, "正在构建界面…");
     ui = buildUI({
       cfg,
       onStart: startRun,
@@ -185,12 +215,59 @@
     A.setMusic(cfg.music !== false);
 
     // 首屏进度收尾
+    // 着色器预热：three.js 惰性编译，若不预热，遮罩淡出后首帧会长时间冻住界面
+    // （表现为"卡在正在编译着色器"）。这里在遮罩可见期间把全部程序编译完。
+    P(0.97, "正在编译着色器…");
+    warmupShaders();
+
+    P(1.0, "就绪");
     document.getElementById("boot").classList.add("hide");
     setTimeout(() => { const b = document.getElementById("boot"); if (b && b.parentNode) b.parentNode.removeChild(b); }, 1000);
 
     state.mode = "menu";
     lastTime = performance.now();
     requestAnimationFrame(loop);
+  }
+
+  /* 编译并缓存全部渲染程序，避免首帧卡顿。
+   * 逐个材质调用 compile()，再跑若干次最小渲染把后处理链路的 program 也建起来。 */
+  function warmupShaders() {
+    const compiled = new Set();
+    const tryCompile = (obj) => {
+      if (!obj || compiled.has(obj)) return;
+      compiled.add(obj);
+      try { renderer.compile(scene, camera); } catch (e) { /* 单个失败不阻塞启动 */ }
+    };
+
+    // 1) 主场景所有材质（蛇管体 / 蛇头 / 核心 / 网格 / 天穹 / 粒子 / 冲击环）
+    try { renderer.compile(scene, camera); } catch (e) {}
+
+    // 2) 隐藏对象也编译一遍（食物核心初始不可见，首帧才创建 → 否则吃到时卡顿）
+    try {
+      const probe = makeCore(0x33f0ff, 1, 0.5);
+      probe.group.position.set(0, -9999, 0);
+      scene.add(probe.group);
+      renderer.compile(scene, camera);
+      scene.remove(probe.group);
+      // 顺带把第一颗核心放进对象池复用，省一次构建
+      probe.group.visible = false;
+      probe.inUse = false;
+      probe.rarity = 1;
+      foodPool.push(probe);
+    } catch (e) { /* 预热失败不影响运行 */ }
+
+    tryCompile(serpent && serpent.mesh);
+
+    // 3) 后处理链路：用一次真实渲染把每个 pass 的 program 建起来
+    try {
+      postfx.render(scene, camera, 0, {
+        damage: 0, levelUp: 0, death: 0, gameOver: 0,
+        vignette: 0.6, aberration: 1.0, exposure: 1.0,
+      });
+    } catch (e) {}
+
+    // 4) 强制同步，确保 GPU 侧真正完成编译（否则卡顿只是被推迟到下一帧）
+    try { renderer.getContext().finish(); } catch (e) {}
   }
 
   function CAPS() { caps = { webgl2: true, absSupport: true }; }
@@ -875,15 +952,35 @@
   }
 
   /* ====================================================================== */
+  // 启动收尾：无论成功或失败，都要让用户看到明确结果，绝不停在加载态
   global.__NEON_READY = function () {};
-  global.addEventListener("DOMContentLoaded", () => {
+
+  function boot() {
+    // 清除启动兜底计时器
+    if (global.__NEON_BOOT_GUARD) { clearTimeout(global.__NEON_BOOT_GUARD); global.__NEON_BOOT_GUARD = null; }
     try {
       init();
       global.__NEON_READY();
     } catch (err) {
-      const tip = document.getElementById("boottip");
-      if (tip) { tip.innerHTML = "启动失败：" + (err && err.message ? err.message : err); tip.style.color = "#ff7c9c"; }
-      throw err;
+      const msg = err && err.message ? err.message : String(err);
+      // 优先走引导层提供的统一错误出口
+      if (global.__NEON_FATAL) {
+        global.__NEON_FATAL("启动失败：" + msg);
+      } else {
+        const tip = document.getElementById("boottip");
+        const b = document.getElementById("boot");
+        if (b) b.classList.remove("hide");
+        if (tip) { tip.innerHTML = "启动失败：" + msg; tip.style.color = "#ff7c9c"; }
+      }
+      // 不抛出，避免污染控制台导致看起来像"卡死"
+      if (global.console) console.error("[NEON] 初始化失败:", err);
     }
-  });
+  }
+
+  if (document.readyState === "loading") {
+    global.addEventListener("DOMContentLoaded", boot, { once: true });
+  } else {
+    // 脚本可能在 DOMContentLoaded 之后才注入（CDN 顺序加载时会发生）
+    boot();
+  }
 })(window);

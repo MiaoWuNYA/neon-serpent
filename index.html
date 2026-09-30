@@ -95,19 +95,43 @@
     document.head.appendChild(s);
   }
 
+  // 致命错误统一出口：无论卡在哪一步，都要让用户看到原因而不是无限等待
+  function fatal(msg) {
+    if (done) return;
+    if (tip) {
+      tip.innerHTML = msg + "<br><span style='opacity:.72;font-size:.92em'>请刷新页面重试</span>";
+      tip.style.color = "#ff7c9c";
+    }
+    if (bar) bar.style.background = "linear-gradient(90deg,#ff4d6d,#ff7c9c)";
+    var b = document.getElementById("boot");
+    if (b) b.classList.remove("hide");   // 出错时确保遮罩可见（承载错误信息）
+  }
+  window.__NEON_FATAL = fatal;
+
   function loadGame() {
     var files = ["src/util.js", "src/audio.js", "src/ui.js", "src/scene.js", "src/game.js", "src/main.js"];
     var k = 0;
     (function next() {
-      if (k >= files.length) return;
+      // 全部脚本就绪：进入引擎初始化。此时进度交给 main.js 继续推进。
+      if (k >= files.length) {
+        progress(0.86, "正在构建场景…");
+        // 兜底：若 12 秒内没收到 READY（init 静默失败/死循环），主动报错
+        if (!window.__NEON_BOOT_GUARD) {
+          window.__NEON_BOOT_GUARD = setTimeout(function () {
+            if (!done) fatal("初始化超时，渲染管线可能不受支持");
+          }, 12000);
+        }
+        return;
+      }
+      var idx = k++;
       var s = document.createElement("script");
-      s.src = files[k];
+      s.src = files[idx];
       s.async = false;
-      s.onload = next;
-      s.onerror = function () {
-        if (tip) { tip.textContent = "资源加载失败：" + files[k]; tip.style.color = "#ff7c9c"; }
+      s.onload = function () {
+        progress(0.30 + (idx + 1) / files.length * 0.52, "正在装配模块 " + (idx + 1) + "/" + files.length + " …");
+        next();
       };
-      k++;
+      s.onerror = function () { fatal("模块加载失败：" + files[idx]); };
       document.body.appendChild(s);
     })();
   }
