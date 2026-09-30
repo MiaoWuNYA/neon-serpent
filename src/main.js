@@ -451,6 +451,18 @@
       const t = f._g.spawnT = (f._g.spawnT || 0) + 1 / 60;
       const s = N.easeOutBack(N.clamp01(t / 0.34));
       f._g.group.scale.setScalar(0.35 + s * 0.65);
+
+      // 自转 + 呼吸，让果子在静止画面里也能被眼睛捕捉到
+      const g = f._g;
+      g.mesh.rotation.y += 0.012;
+      g.mesh.rotation.x += 0.006;
+      g.shell.rotation.y -= 0.017;
+      g.shell.rotation.z += 0.009;
+      g.mat.uniforms.uTime.value = state.time;
+      if (g.beamMat) g.beamMat.uniforms.uTime.value = state.time;
+      const pulse = 1 + Math.sin(state.time * 2.6 + (f.x + f.z)) * 0.055;
+      g.halo.scale.setScalar(0.54 * 16 * pulse);
+      if (g.ring) g.ring.rotation.z += 0.008;
     }
     for (const o of foodPool) {
       if (!used.has(o)) { o.inUse = false; o.group.visible = false; }
@@ -515,22 +527,26 @@
     state.camDist = N.damp(state.camDist, targetDist, 1.6, dt);
     state.camHeight = N.damp(state.camHeight, targetHeight, 1.6, dt);
 
-    // 跟随头部（平滑），叠加 Idle 时的展示轨道
-    if (game.snake.length && playing) {
+    // 注视点：游玩时紧跟头部（系数 1.0，不再是 0.42）。
+    // 之前用 0.42 会导致相机只跟随头部漂移量的 42%，头部与画面中心持续错位，
+    // 头部一动相机就"追不上"，主观感受就是画面乱晃。
+    if (playing && game.snake.length) {
       const h = headWorld.set(game.snake[0].x * CELL, 0, game.snake[0].z * CELL);
-      state.camAim.lerp(tmpV.set(h.x * 0.42, 1.2, h.z * 0.42), 1 - Math.exp(-3.4 * dt));
+      // 保留极轻微的前瞻偏移，但不缩放绝对位置
+      state.camAim.lerp(tmpV.set(h.x, 1.2, h.z), 1 - Math.exp(-6.5 * dt));
     } else if (state.mode !== "play") {
       state.orbit += dt * state.orbitSpeed;
       state.camAim.lerp(tmpV.set(0, 1.5, 0), 1 - Math.exp(-1.6 * dt));
     }
 
-    // 视差（鼠标 / 重力感应）
-    state.parallaxSmooth.x = N.damp(state.parallaxSmooth.x, state.parallax.x, 2.4, dt);
-    state.parallaxSmooth.y = N.damp(state.parallaxSmooth.y, state.parallax.y, 2.4, dt);
+    // 视差（鼠标 / 重力感应）——游玩时大幅削弱，避免和跟随叠加成晃动
+    const pAmp = playing ? 0.30 : 1.0;
+    state.parallaxSmooth.x = N.damp(state.parallaxSmooth.x, state.parallax.x * pAmp, 2.4, dt);
+    state.parallaxSmooth.y = N.damp(state.parallaxSmooth.y, state.parallax.y * pAmp, 2.4, dt);
 
-    // 呼吸式起伏 + 轨道角度
+    // 呼吸起伏只在菜单展示时启用；游玩时相机必须稳如磐石
     const t = state.time;
-    const breathe = Math.sin(t * 0.62) * 0.85 + Math.sin(t * 1.31) * 0.32;
+    const breathe = playing ? 0 : (Math.sin(t * 0.62) * 0.85 + Math.sin(t * 1.31) * 0.32);
     let angle, radius;
     if (playing) {
       angle = 0;
@@ -544,9 +560,15 @@
     const pz = Math.cos(angle) * radius;
     const py = state.camHeight + breathe;
 
-    state.camPos.x = N.damp(state.camPos.x, state.camAim.x + px + state.parallaxSmooth.x * 6.5, 3.2, dt);
-    state.camPos.y = N.damp(state.camPos.y, py + state.parallaxSmooth.y * -3.2, 3.2, dt);
-    state.camPos.z = N.damp(state.camPos.z, state.camAim.z + pz, 3.2, dt);
+    // 游玩时相机位置直接刚性计算（不再二次阻尼到自身），
+    // 只让 camDist / camHeight / camAim 的阻尼承担顺滑，避免三层滞后叠加。
+    const pxT = state.camAim.x + px + state.parallaxSmooth.x * 6.5;
+    const pyT = py + state.parallaxSmooth.y * -3.2;
+    const pzT = state.camAim.z + pz;
+    const posLambda = playing ? 9.0 : 3.2;
+    state.camPos.x = N.damp(state.camPos.x, pxT, posLambda, dt);
+    state.camPos.y = N.damp(state.camPos.y, pyT, posLambda, dt);
+    state.camPos.z = N.damp(state.camPos.z, pzT, posLambda, dt);
 
     // 屏幕震动
     let sx = 0, sy = 0, sz = 0;
@@ -560,11 +582,13 @@
     }
 
     camera.position.set(state.camPos.x + sx, Math.max(3.2, state.camPos.y + sy), state.camPos.z + sz);
-    camera.lookAt(state.camAim.x + sx * 0.6, state.camAim.y + 1.4 + sy * 0.4, state.camAim.z + sz * 0.6);
+    // 注视点与相机位置使用同一参考系（camPos 平滑后的实际值），
+    // 避免"位置追 A、朝向追 B"造成的旋转抖动。
+    camera.lookAt(state.camPos.x, state.camAim.y + 1.2, state.camPos.z);
 
-    // FOV 随速度轻微拉宽 → 速度感
-    const fovTarget = playing ? N.lerp(48, 60, speedRatio) : 50;
-    camera.fov = N.damp(camera.fov, fovTarget, 2.2, dt);
+    // FOV 随速度轻微拉宽 → 速度感（阻尼放慢，减少视野跳变感）
+    const fovTarget = playing ? N.lerp(48, 58, speedRatio) : 50;
+    camera.fov = N.damp(camera.fov, fovTarget, 1.1, dt);
     camera.updateProjectionMatrix();
   }
 

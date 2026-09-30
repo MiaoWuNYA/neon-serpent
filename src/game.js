@@ -53,23 +53,25 @@
       float fres = pow(1.0 - clamp(dot(normalize(vNormalW), normalize(vViewDir)), 0.0, 1.0), 2.4);
 
       vec3 col = body;
-      col += hue(hueShift + 0.06) * pulse * 1.25;
-      col += uHeadColor * headMask * 2.2;
-      col += vec3(0.62, 0.95, 1.0) * fres * (0.55 + 1.5 * uHeadGlow);
-      col += vec3(1.0, 0.96, 0.90) * uFlash * 1.6;
+      // 亮度分级：主体保持 < 1.0，只有头部/脉冲/闪白才突破 1.0 触发泛光。
+      // 之前 headMask 系数 2.2 让整条蛇都远超 bloom 阈值，泛光糊成一团白。
+      col += hue(hueShift + 0.06) * pulse * 0.55;
+      col += uHeadColor * headMask * 0.95;
+      col += vec3(0.62, 0.95, 1.0) * fres * (0.22 + 0.55 * uHeadGlow);
+      col += vec3(1.0, 0.96, 0.90) * uFlash * 1.1;
 
       // ---- 头尾收缩：让管体有"锥形"的实感（配合半径曲线）----
       float edgeFade = smoothstep(0.0, 0.045, t) * smoothstep(0.0, 0.03, 1.0 - t);
 
       // 高频细节：细密缠丝纹
       float fil = sin(t * 620.0) * 0.5 + 0.5;
-      col += body * fil * 0.16;
+      col += body * fil * 0.10;
 
-      float alpha = (0.80 + fres * 0.5 + pulse * 0.4 + headMask * 0.6) * edgeFade;
+      float alpha = (0.66 + fres * 0.34 + pulse * 0.26 + headMask * 0.42) * edgeFade;
       alpha *= smoothstep(0.0, 0.02, uLength - t);
-      alpha = clamp(alpha, 0.0, 1.0);
+      alpha = clamp(alpha, 0.0, 0.92);
 
-      gl_FragColor = vec4(col * (0.85 + pulse * 0.5 + headMask * 1.1), alpha);
+      gl_FragColor = vec4(col, alpha);
     }
   `;
 
@@ -316,7 +318,10 @@
   `;
 
   function makeCore(color, rarity, size) {
-    const geo = new THREE.IcosahedronGeometry(size || 0.54, rarity > 0.5 ? 5 : 3);
+    const R = size || 0.54;
+    // 细分级别收敛：5 级 = 5120 面在俯视远景里毫无收益，纯浪费。
+    const detail = rarity > 0.5 ? 3 : 2;
+    const geo = new THREE.IcosahedronGeometry(R, detail);
     const mat = new THREE.ShaderMaterial({
       vertexShader: CORE_VS, fragmentShader: CORE_FS,
       uniforms: {
@@ -327,42 +332,98 @@
       },
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.renderOrder = 20;
+    // 果子的读取优先级高于蛇身背景：渲染顺序排在蛇之后，
+    // 否则蛇的加性混合会把核心冲淡（这就是"看不到果子"的主因之一）。
+    mesh.renderOrder = 30;
 
     // 外壳线框（全息感）
     const shell = new THREE.Mesh(
-      new THREE.IcosahedronGeometry((size || 0.54) * 1.85, rarity > 0.5 ? 2 : 1),
+      new THREE.IcosahedronGeometry(R * 1.9, 1),
       new THREE.MeshBasicMaterial({
-        color: new THREE.Color(color).multiplyScalar(0.9),
-        wireframe: true, transparent: true, opacity: 0.42,
+        color: new THREE.Color(color).multiplyScalar(1.1),
+        wireframe: true, transparent: true, opacity: 0.55,
         blending: THREE.AdditiveBlending, depthWrite: false,
       })
     );
-    shell.renderOrder = 21;
+    shell.renderOrder = 31;
 
     const g = new THREE.Group();
     g.add(mesh); g.add(shell);
 
-    // 光晕
+    // 地面光柱：在俯视视角下最容易辨识的地标。
+    // 俯视 30 度时，竖直光柱的屏幕投影远大于球体本身。
+    const beamGeo = new THREE.CylinderGeometry(R * 0.62, R * 1.5, 7.0, 12, 1, true);
+    const beamMat = new THREE.ShaderMaterial({
+      vertexShader: `
+        varying vec2 vUv;
+        void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }
+      `,
+      fragmentShader: `
+        precision mediump float;
+        varying vec2 vUv;
+        uniform vec3  uColor;
+        uniform float uTime;
+        void main(){
+          // 底亮顶透，并叠加流动扫描
+          float h = vUv.y;
+          float a = pow(1.0 - h, 1.6) * 0.55;
+          a += (sin(vUv.y * 18.0 - uTime * 2.4) * 0.5 + 0.5) * pow(1.0 - h, 3.0) * 0.35;
+          // 侧向软化：圆柱侧面在边缘处淡出
+          float side = smoothstep(0.0, 0.15, vUv.x) * smoothstep(1.0, 0.85, vUv.x);
+          a *= 0.55 + 0.45 * side;
+          gl_FragColor = vec4(uColor * (1.1 + (1.0 - h) * 1.4), a * 0.85);
+        }
+      `,
+      uniforms: {
+        uColor: { value: new THREE.Color(color) },
+        uTime: { value: 0 },
+      },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.position.y = 3.5;
+    beam.renderOrder = 29;
+    beam.frustumCulled = false;
+    g.add(beam);
+
+    // 光晕：放大到足以在远景中辨识（原来 *9 太小，屏幕上只有几个像素）
     const s = 128;
     const c = document.createElement("canvas"); c.width = c.height = s;
     const ctx2 = c.getContext("2d");
     const rg = ctx2.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
-    rg.addColorStop(0, "rgba(255,255,255,0.95)");
-    rg.addColorStop(0.18, "rgba(255,255,255,0.42)");
-    rg.addColorStop(0.5, "rgba(120,180,255,0.12)");
+    rg.addColorStop(0, "rgba(255,255,255,0.98)");
+    rg.addColorStop(0.14, "rgba(255,255,255,0.62)");
+    rg.addColorStop(0.34, "rgba(180,220,255,0.26)");
+    rg.addColorStop(0.62, "rgba(120,180,255,0.08)");
     rg.addColorStop(1, "rgba(0,0,0,0)");
     ctx2.fillStyle = rg; ctx2.fillRect(0, 0, s, s);
     const haloTex = new THREE.CanvasTexture(c);
     haloTex.colorSpace = THREE.SRGBColorSpace;
     const halo = new THREE.Sprite(new THREE.SpriteMaterial({
       map: haloTex, color: new THREE.Color(color),
-      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.85,
+      transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.95,
     }));
-    halo.scale.setScalar((size || 0.54) * 9);
+    halo.scale.setScalar(R * 16);
+    halo.renderOrder = 32;
     g.add(halo);
 
-    return { group: g, mesh, shell, halo, mat, color: new THREE.Color(color), rarity: rarity || 0 };
+    // 地面标记环：贴在网格上，抬头就知道果子在哪一格
+    const ringGeo = new THREE.RingGeometry(R * 1.5, R * 2.6, 28);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(color), transparent: true, opacity: 0.6,
+      blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.04;
+    ring.renderOrder = 28;
+    g.add(ring);
+
+    return {
+      group: g, mesh, shell, halo, beam, ring, mat, beamMat,
+      color: new THREE.Color(color), rarity: rarity || 0,
+    };
   }
 
   /* ====================================================================== */

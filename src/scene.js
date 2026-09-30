@@ -424,9 +424,11 @@
       uniforms: {
         uScene: { value: null },
         uTexel: { value: new THREE.Vector2() },
-        uThreshold: { value: 0.72 },
-        uSoftKnee: { value: 0.58 },
-        uClamp: { value: 26.0 },
+        // 阈值提高到 1.05：只有真正超过 1.0 的高光（头部、脉冲、核心）
+        // 才进入泛光，避免蛇身整体发白糊掉。
+        uThreshold: { value: 1.05 },
+        uSoftKnee: { value: 0.42 },
+        uClamp: { value: 18.0 },
       },
       depthTest: false, depthWrite: false,
     });
