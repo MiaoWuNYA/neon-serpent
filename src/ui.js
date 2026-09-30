@@ -17,6 +17,10 @@
       score: "得分", best: "最高", level: "形态", len: "长度", combo: "连击", speed: "速度",
       paused: "已暂停", gameover: "生命体征消失", newRecord: "新纪录！",
       statScore: "本局得分", statLen: "最终长度", statCombo: "最高连击", statTime: "存活时间",
+      causeWall: "撞上能量墙 —— 看紧边界光框",
+      causeSelf: "咬到自己的身体",
+      causeUnknown: "被未知力量终结",
+      tipWall: "边界有发光墙，贴边时会变红脉冲",
       quality: "画质", sound: "音效", music: "背景乐", language: "语言",
       touchMode: "触控方式", touchSwipe: "滑动", touchStick: "摇杆",
       fullscreen: "全屏", on: "开", off: "关",
@@ -38,6 +42,10 @@
       score: "SCORE", best: "BEST", level: "FORM", len: "LENGTH", combo: "COMBO", speed: "SPEED",
       paused: "PAUSED", gameover: "VITAL SIGNS LOST", newRecord: "NEW RECORD!",
       statScore: "SCORE", statLen: "FINAL LENGTH", statCombo: "MAX COMBO", statTime: "SURVIVED",
+      causeWall: "HIT THE ENERGY WALL — watch the boundary frame",
+      causeSelf: "BIT YOUR OWN TAIL",
+      causeUnknown: "TERMINATED BY UNKNOWN FORCES",
+      tipWall: "The glowing walls mark the edge — they pulse red when you get close",
       quality: "QUALITY", sound: "SFX", music: "MUSIC", language: "LANGUAGE",
       touchMode: "TOUCH", touchSwipe: "SWIPE", touchStick: "JOYSTICK",
       fullscreen: "FULLSCREEN", on: "ON", off: "OFF",
@@ -61,6 +69,8 @@
     --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
     --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
   }
+  .cause{margin:2px 0 10px;font-size:clamp(11px,2.8vw,13px);letter-spacing:.06em;}
+
   #hud{position:fixed;inset:0;pointer-events:none;font-family:var(--font);color:var(--ink);
        -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
        z-index:10;}
@@ -320,6 +330,7 @@
       <div class="panel">
         <h2 data-i18n="gameover"></h2>
         <div class="lead">RUN TERMINATED</div>
+        <div class="cause" data-hud="cause"></div>
         <div class="rec" data-hud="record" style="display:none" data-i18n="newRecord"></div>
         <div class="stats">
           <div class="stat"><div class="k" data-i18n="statScore"></div><div class="v" data-hud="oScore">0</div></div>
@@ -617,6 +628,15 @@
         api.setHud("oTime", o.time);
         const rec = root.querySelector('[data-hud="record"]');
         if (rec) rec.style.display = o.record ? "block" : "none";
+        // 死因：明确告诉玩家这一局是被什么终结的
+        const cause = root.querySelector('[data-hud="cause"]');
+        if (cause) {
+          const key = o.reason === "wall" ? "causeWall"
+                    : o.reason === "self" ? "causeSelf"
+                    : "causeUnknown";
+          cause.textContent = api.t(key);
+          cause.style.color = o.reason === "wall" ? "#7fdcff" : "#ff9ab4";
+        }
       },
       refresh() { applyI18n(); renderSegs(); },
     };

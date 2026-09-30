@@ -179,9 +179,25 @@
     this.mesh.visible = true; this.head.visible = true; this.halo.visible = true;
 
     this.curve.points = pts;
+
+    // 关键：管体段数必须与路径实际长度匹配。
+    // 若段数远大于控制点数（例如 5 格蛇配 300 段），Catmull-Rom 会在极短弦上
+    // 反复过冲，产生自相交管壁；叠加加性混合与 depthWrite:false 后
+    // 每像素被覆盖数十次 → 整条蛇过曝成白色看不见。
+    // 这里按弧长推导段数：每段约 0.055 世界单位，并夹在合理区间内。
+    let segLen = 0;
+    for (let i = 1; i < n; i++) segLen += pts[i].distanceTo(pts[i - 1]);
+    const wanted = Math.round(segLen / 0.055);
+    const segs = Math.max(12, Math.min(this.tubeSegments, wanted));
+
+    this.curveType = this.curveType || "catmullrom";
+    this.curve.curveType = this.curveType;
+    this.curve.tension = 0.5;
+
     const old = this.geo;
-    this.geo = new THREE.TubeGeometry(this.curve, this.tubeSegments, this.headRadius, this.radialSegments, false);
-    this._applyTaper(this.geo, pts);
+    this.geo = new THREE.TubeGeometry(this.curve, segs, this.headRadius, this.radialSegments, false);
+    this._segs = segs;
+    this._applyTaper(this.geo, pts, segs);
     this.mesh.geometry = this.geo;
     if (old) old.dispose();
 
@@ -196,18 +212,17 @@
       this._lastDir = dir.clone().normalize();
     }
     this.tailFade = visualLength === undefined ? 1 : visualLength;
-    void this._lastDir;
   };
 
   // 半径锥形：尾细 → 中段饱满 → 头略膨大。
   // TubeGeometry 顶点按 i = seg*(radialSegments+1) + r 排列，可直接按段索引计算中心线。
-  Serpent.prototype._applyTaper = function (geo, pts) {
+  Serpent.prototype._applyTaper = function (geo, pts, segs) {
     const rad = this.radialSegments + 1;
     const posAttr = geo.attributes.position;
     const nrmAttr = geo.attributes.normal;
     const arr = posAttr.array;
     const narr = nrmAttr.array;
-    const tube = this.tubeSegments;
+    const tube = segs || this._segs || this.tubeSegments;
     const nPts = pts.length;
     const count = posAttr.count;
 

@@ -9,6 +9,8 @@
 
   const CELL = 1.7;
   const GRID = 21;
+  // 与 game.js 的 half = (grid-1)/2 完全一致：这是"出界即死"的真实边界。
+  const HALF_EXTENT = ((GRID - 1) / 2) * CELL;
 
   const state = {
     mode: "boot",           // boot | menu | play | pause | over
@@ -45,7 +47,7 @@
     volume: 0.85,
   }, N.store.load());
 
-  let renderer, scene, camera, postfx, particles, rings, grid, galaxy, env;
+  let renderer, scene, camera, postfx, particles, rings, grid, galaxy, env, walls;
   let serpent, game, ui, foodPool = [];
   let caps = {};
   let fps = new N.FpsMeter(60);
@@ -128,9 +130,14 @@
     galaxy = SC.buildGalaxy(q.galaxy);
     scene.add(galaxy);
 
-    // ---- 地面网格 ----
-    grid = SC.buildGrid(CELL, GRID * CELL * 0.72);
+    // ---- 地面网格 + 边界墙 ----
+    // halfExtent 必须与 game.js 的死亡判定完全一致，否则玩家会看到
+    // "网格还在延伸却已经出界"的诡异手感。
+    P(0.895, "正在构建边界…");
+    grid = SC.buildGrid(CELL, HALF_EXTENT);
     scene.add(grid);
+    walls = SC.buildWalls(HALF_EXTENT, 3.4, 0x4fc3ff);
+    scene.add(walls);
 
     // ---- 蛇 ----
     P(0.91, "正在构建蛇体网格…");
@@ -298,6 +305,7 @@
     particles.capEnabled = q.particles;
     galaxy.material.uniforms.uDensity.value = q.galaxy;
     grid.material.uniforms.uRadius.value = GRID * CELL * 0.72;
+    grid.material.uniforms.uEdge.value = HALF_EXTENT;
 
     if (serpent) {
       serpent.tubeSegments = qualityIdx === 0 ? 300 : qualityIdx === 1 ? 240 : qualityIdx === 2 ? 180 : 130;
@@ -390,6 +398,7 @@
       ui.setOverStats({
         score: state.score, len: game.snake.length,
         combo: state.maxCombo, time: timeStr, record,
+        reason: state.deathReason || "unknown",
       });
       ui.show("over");
       ui.setTouchVisible(false);
@@ -699,6 +708,32 @@
     gu.uFocusAmt.value = N.damp(gu.uFocusAmt.value, state.mode === "play" ? 1 : 0.35, 3, rawDt);
     gu.uPulse.value = N.damp(gu.uPulse.value, state.combo * 0.08, 4, rawDt);
 
+    // 边界墙：头部越靠近边缘，整墙越亮并脉冲告警
+    if (walls) {
+      const wu = walls.userData.wallMat.uniforms;
+      wu.uTime.value = state.time;
+      let near = 0;
+      const hp = worldPts[0];
+      if (hp) {
+        // 归一化"贴边程度"：距离边界 3 格以内开始报警
+        const margin = 3 * CELL * 0.5;
+        const dEdge = HALF_EXTENT - Math.max(Math.abs(hp.x), Math.abs(hp.z));
+        near = N.clamp01(1 - dEdge / margin);
+      }
+      state.wallDanger = N.damp(state.wallDanger || 0, state.mode === "play" ? near : 0, 5, rawDt);
+      wu.uDanger.value = state.wallDanger;
+      // 危险时偏红，常态青色
+      const base = walls.userData.baseColor;
+      const t = state.wallDanger;
+      walls.userData.wallMat.uniforms.uColor.value.setRGB(
+        base.r + (1.0 - base.r) * t,
+        base.g + (0.25 - base.g) * t,
+        base.b + (0.35 - base.b) * t
+      );
+      walls.userData.lineMat.opacity = 0.85 + t * 0.15;
+      walls.userData.lineMat.color.copy(walls.userData.wallMat.uniforms.uColor.value);
+    }
+
     // 天穹
     galaxy.material.uniforms.uTime.value = state.time;
     galaxy.position.copy(camera.position);
@@ -795,6 +830,8 @@
       }
       case "death": {
         serpent.mat.uniforms.uFlash.value = 1;
+        // 记住死因，结算界面明确告诉玩家是被什么终结的
+        state.deathReason = ev.reason || "unknown";
         break;
       }
     }

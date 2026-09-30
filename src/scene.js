@@ -814,6 +814,7 @@
     uniform float uCell;
     uniform float uTime;
     uniform float uRadius;
+    uniform float uEdge;
     uniform float uPulse;
     uniform vec3  uColorA;
     uniform vec3  uColorB;
@@ -832,8 +833,11 @@
       float minor = gridLine(p, uCell * 4.0, 1.5) * 0.30;
       float major = gridLine(p, uCell, 1.0) * 0.75;
 
-      float r = length(p);
-      float fade = 1.0 - smoothstep(uRadius * 0.55, uRadius, r);
+      // 用切比雪夫距离（方形域）而非欧氏距离，配合方形活动区
+      float r = max(abs(p.x), abs(p.y));
+
+      // 网格在边界稍外侧就淡尽，让"能走到哪"一目了然
+      float fade = 1.0 - smoothstep(uEdge * 0.92, uEdge * 1.06, r);
 
       vec3 col = uColorA * minor + uColorB * major;
 
@@ -842,24 +846,36 @@
       float halo = exp(-d * d * 0.0075) * 0.9 * uFocusAmt;
       col += uColorA * halo;
 
-      // 呼吸脉冲：从中心向外扩散的环
+      // 呼吸脉冲：从中心向外扩散的环（同样用方形距离）
       float wave = sin(r * 0.42 - uTime * 1.35) * 0.5 + 0.5;
       col *= 0.78 + 0.34 * wave * (1.0 - uFocusAmt * 0.4);
 
+      // 边界光框：紧贴致命边界的两条亮线，明确标出活动范围的尽头
+      float edgeLine = gridLine(p, uEdge * 2.0, 1.0);
+      float edgeBand = smoothstep(uEdge * 0.995, uEdge, r);
+      vec3 edgeCol = vec3(0.42, 0.86, 1.0);
+      float ea = edgeLine * edgeBand * 1.5;
+
       float a = (minor + major + halo + 0.012) * fade;
       a += uPulse * fade * 0.10;
+      col += edgeCol * ea;
+      a += ea * 0.9;
       gl_FragColor = vec4(col, a);
     }
   `;
 
   function buildGrid(cell, radius, colorA, colorB) {
-    const geo = new THREE.PlaneGeometry(radius * 2.4, radius * 2.4, 1, 1);
+    // 四边留出边界墙的余量：网格本身代表可活动区域，
+    // 因此平面尺寸直接覆盖到边界墙外侧一点，避免玩家看到"网格还在延伸却已出界"。
+    const size = radius * 2.0;
+    const geo = new THREE.PlaneGeometry(size, size, 1, 1);
     const mat = new THREE.ShaderMaterial({
       vertexShader: GRID_VS, fragmentShader: GRID_FS,
       uniforms: {
         uCell: { value: cell },
         uTime: { value: 0 },
-        uRadius: { value: radius },
+        uRadius: { value: size * 0.5 },
+        uEdge: { value: radius },        // 严格的可见/致命边界
         uPulse: { value: 0 },
         uColorA: { value: new THREE.Color(colorA || 0x1b2a6e) },
         uColorB: { value: new THREE.Color(colorB || 0x5f4dff) },
@@ -878,6 +894,121 @@
   }
 
   /* ====================================================================== */
+  /* 边界墙：把"出界即死"这条规则变成看得见的东西。                         */
+  /*     四道垂直发光墙 + 顶部光带，越靠近越亮，危险时整墙脉冲告警。         */
+  /* ====================================================================== */
+  const WALL_VS = `
+    varying vec2 vUv;
+    varying vec3 vPos;
+    void main(){
+      vUv = uv;
+      vPos = position;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `;
+
+  const WALL_FS = `
+    precision highp float;
+    varying vec2 vUv;
+    varying vec3 vPos;
+    uniform float uTime;
+    uniform vec3  uColor;
+    uniform float uDanger;     // 0~1，头部靠近时升高
+    uniform float uHeight;
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5453); }
+
+    void main(){
+      // vUv.y 沿高度 0(底) -> 1(顶)
+      float h = vUv.y;
+
+      // 底部最亮，向上衰减，模拟能量墙从地面升起
+      float base = pow(1.0 - h, 1.8);
+
+      // 能量扫描线：沿高度和水平方向缓缓流动
+      float scan = sin(vUv.x * 42.0 - uTime * 1.6 + h * 6.0) * 0.5 + 0.5;
+      scan = pow(scan, 6.0) * 0.55;
+
+      // 顶部锋利光带
+      float cap = smoothstep(0.86, 1.0, h) * 0.9;
+
+      // 网格竖纹，暗示边界刻度
+      float ticks = step(0.965, fract(vUv.x * 64.0)) * (1.0 - h) * 0.5;
+
+      // 危险脉冲
+      float danger = uDanger * (0.5 + 0.5 * sin(uTime * 9.0));
+
+      float a = base * 0.55 + scan + cap + ticks + danger * 0.85;
+      vec3 col = uColor * (0.85 + danger * 1.4 + scan * 0.6);
+
+      // 上下边缘软化，避免硬切
+      float fade = smoothstep(0.0, 0.06, h) * (1.0 - smoothstep(0.94, 1.0, h) * 0.35);
+      gl_FragColor = vec4(col * a * fade, a * fade * 0.9);
+    }
+  `;
+
+  /* 构建四道边界墙。halfExtent 为游戏区半宽（世界单位），height 为墙高。 */
+  function buildWalls(halfExtent, height, color) {
+    const group = new THREE.Group();
+    const H = height || 3.2;
+    const side = halfExtent * 2;
+    const col = new THREE.Color(color || 0x4fc3ff);
+
+    const mat = new THREE.ShaderMaterial({
+      vertexShader: WALL_VS,
+      fragmentShader: WALL_FS,
+      uniforms: {
+        uTime: { value: 0 },
+        uColor: { value: col.clone() },
+        uDanger: { value: 0 },
+        uHeight: { value: H },
+      },
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+
+    const geo = new THREE.PlaneGeometry(side, H, 1, 1);
+    const mk = (x, z, ry) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, H * 0.5, z);
+      m.rotation.y = ry;
+      m.renderOrder = 12;
+      m.frustumCulled = false;
+      group.add(m);
+      return m;
+    };
+    mk(0, -halfExtent, 0);                 // 北
+    mk(0, halfExtent, Math.PI);            // 南
+    mk(-halfExtent, 0, Math.PI / 2);       // 西
+    mk(halfExtent, 0, -Math.PI / 2);       // 东
+
+    // 地面上的边界细线：即使在墙被遮挡时也能看清活动范围
+    const lineGeo = new THREE.BufferGeometry();
+    const y = 0.02, e = halfExtent;
+    const verts = new Float32Array([
+      -e, y, -e, e, y, -e,
+      e, y, -e, e, y, e,
+      e, y, e, -e, y, e,
+      -e, y, e, -e, y, -e,
+    ]);
+    lineGeo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+    const lineMat = new THREE.LineBasicMaterial({
+      color: col.clone(), transparent: true, opacity: 0.85,
+    });
+    const line = new THREE.LineSegments(lineGeo, lineMat);
+    line.renderOrder = 13;
+    line.frustumCulled = false;
+    group.add(line);
+
+    group.userData.wallMat = mat;
+    group.userData.lineMat = lineMat;
+    group.userData.baseColor = col.clone();
+    return group;
+  }
+
+  /* ====================================================================== */
   /* 导出                                                                    */
   /* ====================================================================== */
   S.buildEnvironment = buildEnvironment;
@@ -886,6 +1017,7 @@
   S.ParticleSystem = ParticleSystem;
   S.ShockRings = ShockRings;
   S.buildGrid = buildGrid;
+  S.buildWalls = buildWalls;
   S.makeRT = makeRT;
   S.fbm = fbm;
 
